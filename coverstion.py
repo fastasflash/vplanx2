@@ -1,29 +1,26 @@
+cat > qvm2vplanx.py <<'PY'
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-qvm2vplanx.py — robust XLSX -> vplanx converter (std-lib only).
+qvm2vplanx.py - robust XLSX -> vplanx converter using only the Python stdlib.
 
-Key options:
-  --sheet N                 1-based worksheet index (default 1)
-  --header-row R            1-based header row; use header names (Title/Link/Description/Type)
-  --title-col A --link-col C [--desc-col B --type-col D]
-                           column letters when there is no header row
-  --show-preview            print first 10 rows to help choose row/column numbers
-  --no-gzip                 write plain XML instead of .vplanx.gz
+Usage examples:
+  python3.12 qvm2vplanx.py i2c_vplan.xlsx --show-preview
+  python3.12 qvm2vplanx.py i2c_vplan.xlsx --header-row 2
+  python3.12 qvm2vplanx.py i2c_vplan.xlsx --title-col A --link-col C --desc-col B --type-col D
 """
+
 import sys, os, re, uuid, time, argparse, logging, gzip, zipfile
 import xml.etree.ElementTree as ET
 
-log = logging.getLogger("qvm2vplanx")
+LOG = logging.getLogger("qvm2vplanx")
 logging.basicConfig(level=logging.INFO)
 VERSION = "1.2.0"
 
-# ---------- helpers ----------
-def col_to_idx(s: str) -> int:
-    """Excel column letter -> 0-based index. E.g. A->0, B->1, AA->26"""
+def col_to_idx(s):
     s = s.strip().upper()
     if not s or not re.fullmatch(r"[A-Z]+", s):
-        raise ValueError(f"Bad column letter: {s!r}")
+        raise ValueError("Bad column letter: %r" % s)
     n = 0
     for ch in s:
         n = n * 26 + (ord(ch) - 64)
@@ -41,15 +38,15 @@ def read_shared_strings(z):
         ss.append(text)
     return ss
 
-def pick_sheet_file(z, sheet_index: int) -> str:
+def pick_sheet_file(z, sheet_index):
     sheets = sorted([n for n in z.namelist() if re.match(r"xl/worksheets/sheet\d+\.xml$", n)])
     if not sheets:
         raise RuntimeError("No xl/worksheets/sheetN.xml files in workbook.")
     if sheet_index < 1 or sheet_index > len(sheets):
-        raise RuntimeError(f"--sheet {sheet_index} out of range 1..{len(sheets)}")
-    return sheets[sheet_index-1]
+        raise RuntimeError("--sheet %d out of range 1..%d" % (sheet_index, len(sheets)))
+    return sheets[sheet_index - 1]
 
-def read_rows_from_sheet(z, sheet_file: str, shared_strings):
+def read_rows_from_sheet(z, sheet_file, shared_strings):
     root = ET.fromstring(z.read(sheet_file))
     rows = []
     for row in root.findall(".//{*}row"):
@@ -70,15 +67,14 @@ def read_rows_from_sheet(z, sheet_file: str, shared_strings):
 def preview(rows, n=10):
     print("--- preview: first rows ---")
     for i, r in enumerate(rows[:n], start=1):
-        print(f"Row {i:2d}:", [str(x) for x in r])
+        print("Row %2d:" % i, [str(x) for x in r])
     print("---------------------------")
 
-# ---------- parse workbook ----------
 def parse_xlsx(xlsx_path, sheet_index=1, header_row=None,
                title_col=None, link_col=None, desc_col=None, type_col=None,
                show_preview=False):
     if not zipfile.is_zipfile(xlsx_path):
-        raise RuntimeError(f"Not a valid XLSX: {xlsx_path}")
+        raise RuntimeError("Not a valid XLSX: %s" % xlsx_path)
     with zipfile.ZipFile(xlsx_path, "r") as z:
         ss = read_shared_strings(z)
         sheet_file = pick_sheet_file(z, sheet_index)
@@ -87,18 +83,19 @@ def parse_xlsx(xlsx_path, sheet_index=1, header_row=None,
     if show_preview:
         preview(rows)
 
-    # If explicit column letters are provided -> column-based mode (no headers)
     if title_col and link_col:
         t_idx = col_to_idx(title_col)
         l_idx = col_to_idx(link_col)
         d_idx = col_to_idx(desc_col) if desc_col else None
         ty_idx = col_to_idx(type_col) if type_col else None
-        start_row = (header_row or 1)  # if user gave header_row, treat it as data start row
+        start_row = (header_row or 1)
         entries = []
         for r in rows[start_row:]:
-            if t_idx >= len(r): continue
-            title = r[t_idx].strip()
-            if not title: continue
+            if t_idx >= len(r):
+                continue
+            title = (r[t_idx] or "").strip()
+            if not title:
+                continue
             link = (r[l_idx].strip() if l_idx < len(r) else "")
             desc = (r[d_idx].strip() if d_idx is not None and d_idx < len(r) else "")
             typ  = (r[ty_idx].strip() if ty_idx is not None and ty_idx < len(r) else "")
@@ -107,14 +104,12 @@ def parse_xlsx(xlsx_path, sheet_index=1, header_row=None,
             raise RuntimeError("No entries found using the specified column letters.")
         return entries
 
-    # Otherwise, header-based mode: find header row and map names
-    if header_row:  # 1-based
+    if header_row:
         h = header_row - 1
         if h >= len(rows):
-            raise RuntimeError(f"--header-row {header_row} beyond last row ({len(rows)})")
+            raise RuntimeError("--header-row %d beyond last row (%d)" % (header_row, len(rows)))
         header = [str(x).strip().lower() for x in rows[h]]
     else:
-        # heuristic: scan first 30 rows for both 'title' and 'link'
         header, h = None, None
         for i, r in enumerate(rows[:30]):
             low = [str(x).strip().lower() for x in r]
@@ -137,19 +132,19 @@ def parse_xlsx(xlsx_path, sheet_index=1, header_row=None,
                            "Use column letters instead (e.g. --title-col A --link-col C).")
 
     entries = []
-    for r in rows[(header_row - 1 + 1) if header_row else (h + 1):]:
+    start = (header_row - 1 + 1) if header_row else (h + 1)
+    for r in rows[start:]:
         title = r[name_to_idx["title"]].strip() if name_to_idx["title"] < len(r) else ""
-        if not title: continue
+        if not title:
+            continue
         link  = r[name_to_idx["link"]].strip()  if name_to_idx["link"]  < len(r) else ""
-        desc  = r[name_to_idx["description"]].strip() if "description" in name_to_idx and name_to_idx["description"] < len(r) else ""
-        typ   = r[name_to_idx["type"]].strip() if "type" in name_to_idx and name_to_idx["type"] < len(r) else ""
+        desc  = r[name_to_idx.get("description", -1)].strip() if name_to_idx.get("description", -1) < len(r) and name_to_idx.get("description", -1) >= 0 else ""
+        typ   = r[name_to_idx.get("type", -1)].strip() if name_to_idx.get("type", -1) < len(r) and name_to_idx.get("type", -1) >= 0 else ""
         entries.append({"title": title, "desc": desc, "link": link, "type": typ})
-
     if not entries:
         raise RuntimeError("No entries found under the detected header row.")
     return entries
 
-# ---------- build vplanx ----------
 def build_vplanx(entries, plan_name):
     ET.register_namespace("vplanx", "http://www.cadence.com/vplanx")
     root = ET.Element("vplanx:plan", {"xmlns:vplanx": "http://www.cadence.com/vplanx"})
@@ -185,13 +180,11 @@ def save_tree(tree, out_path, gzip_out=True):
     with (gzip.open(out_path, "wb") if gzip_out else open(out_path, "wb")) as f:
         tree.write(f, encoding="utf-8", xml_declaration=True)
 
-# ---------- CLI ----------
 def main(argv):
     ap = argparse.ArgumentParser(description="Convert XLSX to Cadence vPlanx (std-lib only)")
     ap.add_argument("xlsx", help="Input .xlsx file")
     ap.add_argument("--out", help="Output filename (default: <xlsxname>.vplanx)")
     ap.add_argument("--no-gzip", action="store_true", help="Write plain XML instead of gzipped .vplanx")
-
     ap.add_argument("--sheet", type=int, default=1, help="Worksheet index (1-based). Default 1")
     ap.add_argument("--header-row", type=int, help="Header row (1-based). If omitted, script searches for Title/Link")
     ap.add_argument("--title-col", help="Column letter for Title when no header row (e.g. A)")
@@ -201,9 +194,8 @@ def main(argv):
     ap.add_argument("--show-preview", action="store_true", help="Print first 10 rows for debugging")
 
     args = ap.parse_args(argv)
-
     if not os.path.exists(args.xlsx):
-        ap.error(f"file not found: {args.xlsx}")
+        ap.error("file not found: %s" % args.xlsx)
 
     try:
         entries = parse_xlsx(
@@ -217,7 +209,7 @@ def main(argv):
             show_preview=args.show_preview,
         )
     except Exception as e:
-        log.error(str(e))
+        LOG.error(str(e))
         sys.exit(2)
 
     plan_name = os.path.splitext(os.path.basename(args.xlsx))[0]
@@ -228,3 +220,4 @@ def main(argv):
 
 if __name__ == "__main__":
     main(sys.argv[1:])
+PY
